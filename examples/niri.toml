@@ -1,0 +1,19 @@
+backend = "niri"
+shell = "bash"
+
+[[rules]]
+name = "terminal-esc"
+match = ["foot", "kitty"]
+key = "esc"
+actions = [
+  { exec = "fcitx5-remote -s keyboard-us" },
+]
+
+[[rules]]
+name = "terminal-ctrl-c"
+match = ["foot", "kitty"]
+key = "c"
+modifiers = ["ctrl"]
+actions = [
+  { exec = "fcitx5-remote -s keyboard-us" },
+]
