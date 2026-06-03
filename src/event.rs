@@ -1,28 +1,14 @@
 use std::{
-    fs::{self, File},
-    io::Read,
-    mem,
     path::PathBuf,
     sync::mpsc::{self, Receiver},
     thread,
 };
 
 use anyhow::{bail, Context, Result};
+use evdev::{Device, EventSummary, KeyCode};
 use tracing::{debug, info, warn};
 
 use crate::types::{Key, Modifier};
-
-const EV_KEY: u16 = 0x01;
-const KEY_ESC: u16 = 1;
-const KEY_C: u16 = 46;
-const KEY_LEFTCTRL: u16 = 29;
-const KEY_RIGHTCTRL: u16 = 97;
-const KEY_LEFTSHIFT: u16 = 42;
-const KEY_RIGHTSHIFT: u16 = 54;
-const KEY_LEFTALT: u16 = 56;
-const KEY_RIGHTALT: u16 = 100;
-const KEY_LEFTMETA: u16 = 125;
-const KEY_RIGHTMETA: u16 = 126;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modifiers {
@@ -52,10 +38,9 @@ pub struct KeyEvent {
     pub modifiers: Modifiers,
 }
 
-/// Corresponds to kernel's `struct input_event` but only contains the fields we care about.
 #[derive(Debug)]
 struct RawKeyEvent {
-    code: u16,
+    code: KeyCode,
     value: i32,
 }
 
@@ -68,7 +53,7 @@ impl EvdevEventSource {
     pub fn new(configured_devices: &[String]) -> Result<Self> {
         let devices = if configured_devices.is_empty() {
             let devices = discover_devices()?;
-            info!(devices = devices.len(), "discovered input devices");
+            info!(devices = devices.len(), "discovered keyboard input devices");
             devices
         } else {
             let devices: Vec<_> = configured_devices.iter().map(PathBuf::from).collect();
@@ -84,12 +69,12 @@ impl EvdevEventSource {
         let mut opened = 0;
 
         for path in devices {
-            match File::open(&path) {
-                Ok(file) => {
+            match Device::open(&path) {
+                Ok(device) => {
                     opened += 1;
-                    info!(device = %path.display(), "opened input device");
+                    info!(device = %path.display(), name = ?device.name(), "opened input device");
                     let sender = sender.clone();
-                    thread::spawn(move || read_device(path, file, sender));
+                    thread::spawn(move || read_device(path, device, sender));
                 }
                 Err(error) => {
                     warn!(device = %path.display(), error = %error, "failed to open input device")
@@ -134,22 +119,22 @@ impl EvdevEventSource {
         }
     }
 
-    fn update_modifiers(&mut self, code: u16, value: i32) {
+    fn update_modifiers(&mut self, code: KeyCode, value: i32) {
         let pressed = value != 0;
         match code {
-            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+            KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL => {
                 self.modifiers.ctrl = pressed;
                 debug!(pressed, "ctrl modifier changed");
             }
-            KEY_LEFTALT | KEY_RIGHTALT => {
+            KeyCode::KEY_LEFTALT | KeyCode::KEY_RIGHTALT => {
                 self.modifiers.alt = pressed;
                 debug!(pressed, "alt modifier changed");
             }
-            KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
+            KeyCode::KEY_LEFTSHIFT | KeyCode::KEY_RIGHTSHIFT => {
                 self.modifiers.shift = pressed;
                 debug!(pressed, "shift modifier changed");
             }
-            KEY_LEFTMETA | KEY_RIGHTMETA => {
+            KeyCode::KEY_LEFTMETA | KeyCode::KEY_RIGHTMETA => {
                 self.modifiers.super_key = pressed;
                 debug!(pressed, "super modifier changed");
             }
@@ -159,53 +144,43 @@ impl EvdevEventSource {
 }
 
 fn discover_devices() -> Result<Vec<PathBuf>> {
-    let mut devices = Vec::new();
-
-    for entry in fs::read_dir("/dev/input").context("failed to read /dev/input")? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("event"))
-        {
-            devices.push(path);
-        }
-    }
-
-    Ok(devices)
+    Ok(evdev::enumerate()
+        .filter(|(_, device)| is_keyboard_device(device))
+        .map(|(path, _)| path)
+        .collect())
 }
 
-fn read_device(path: PathBuf, mut file: File, sender: mpsc::Sender<RawKeyEvent>) {
-    let event_size = mem::size_of::<libc::input_event>();
-    let mut buffer = vec![0_u8; event_size];
+fn read_device(path: PathBuf, mut device: Device, sender: mpsc::Sender<RawKeyEvent>) {
+    info!(device = %path.display(), "started input device reader");
 
     loop {
-        if let Err(error) = file.read_exact(&mut buffer) {
-            warn!(device = %path.display(), error = %error, "failed to read input device");
-            return;
-        }
-
-        let event = unsafe { (buffer.as_ptr() as *const libc::input_event).read_unaligned() };
-        if event.type_ == EV_KEY {
-            if sender
-                .send(RawKeyEvent {
-                    code: event.code,
-                    value: event.value,
-                })
-                .is_err()
-            {
-                warn!(device = %path.display(), "input event receiver stopped");
+        let events = match device.fetch_events() {
+            Ok(events) => events,
+            Err(error) => {
+                warn!(device = %path.display(), error = %error, "failed to read input device");
                 return;
+            }
+        };
+
+        for event in events {
+            if let EventSummary::Key(_, code, value) = event.destructure() {
+                if sender.send(RawKeyEvent { code, value }).is_err() {
+                    warn!(device = %path.display(), "input event receiver stopped");
+                    return;
+                }
             }
         }
     }
 }
 
-fn key_name(code: u16) -> Option<Key> {
-    match code {
-        KEY_ESC => Some(Key::Esc),
-        KEY_C => Some(Key::C),
-        _ => None,
-    }
+fn is_keyboard_device(device: &Device) -> bool {
+    device.supported_keys().is_some_and(|keys| {
+        keys.contains(KeyCode::KEY_ESC)
+            && keys.contains(KeyCode::KEY_C)
+            && keys.contains(KeyCode::KEY_ENTER)
+    })
+}
+
+fn key_name(code: KeyCode) -> Option<Key> {
+    Key::from_keycode(code)
 }
