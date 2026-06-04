@@ -17,3 +17,12 @@ modifiers = ["ctrl"]
 actions = [
   { exec = "fcitx5-remote -s keyboard-us" },
 ]
+
+[[rules]]
+name = "terminal-ctrl-c"
+match = ["foot", "kitty"]
+key = "LEFTBRACKET"
+modifiers = ["ctrl"]
+actions = [
+  { exec = "fcitx5-remote -s keyboard-us" },
+]

@@ -106,9 +106,7 @@ impl EvdevEventSource {
                 continue;
             }
 
-            let Some(key) = key_name(event.code) else {
-                continue;
-            };
+            let key = Key::from_keycode(event.code);
 
             debug!(%key, modifiers = ?self.modifiers, "observed supported key press");
 
@@ -179,8 +177,4 @@ fn is_keyboard_device(device: &Device) -> bool {
             && keys.contains(KeyCode::KEY_C)
             && keys.contains(KeyCode::KEY_ENTER)
     })
-}
-
-fn key_name(code: KeyCode) -> Option<Key> {
-    Key::from_keycode(code)
 }
